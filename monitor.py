@@ -21,7 +21,7 @@ import requests
 CO_CD = "A420"
 SITE_NO = "0013"        # 용산아이파크몰
 MOVIE_KEYWORD = "오디세이"  # 영화 제목에 포함될 키워드
-DAYS_AHEAD = 14         # 오늘부터 며칠 뒤까지 체크
+DAYS_AHEAD = 21         # 오늘부터 며칠 뒤까지 체크
 STATE_FILE = "state.json"
 # ================================================
 
@@ -83,7 +83,12 @@ def check_date(target: date) -> list[str]:
 
     payload = resp.json()
     rows = payload.get("data") or []
-    print(f"[debug] {target} rows={len(rows)}")
+    imax = sorted({
+        f'{r.get("scnsNm","")}/{r.get("expoProdNm","")}'
+        for r in rows
+        if "IMAX" in ((r.get("scnsNm") or "") + (r.get("scnsEnm") or "")).upper()
+    })
+    print(f"[debug] {target} rows={len(rows)} imax={imax}")
 
     found = []
     for row in rows:
