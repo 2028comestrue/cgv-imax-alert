@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 # ===================== 설정 =====================
 THEATER_CODE = "0013"   # 용산아이파크몰 (CGV 극장코드)
 AREA_CODE = "01"        # 서울
-MOVIE_KEYWORD = "듄"     # 영화 제목에 포함될 키워드 (예: "듄", "아바타")
+MOVIE_KEYWORD = "호프"     # 영화 제목에 포함될 키워드 (예: "듄", "아바타")
 DAYS_AHEAD = 14         # 오늘부터 며칠 뒤까지 체크할지
 STATE_FILE = "state.json"
 # ================================================
