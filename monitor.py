@@ -1,13 +1,12 @@
 """
-CGV IMAX 예매 오픈 알리미 (v2 — cgv.co.kr JSON API 사용)
-- /api/v1/booking/searchMovScnInfo 로 극장/날짜별 상영정보 조회
-- 키워드 영화의 IMAX관 회차가 열리면 텔레그램으로 알림
+CGV IMAX 예매 오픈 알리미 (v4 — 다중 영화 키워드 지원)
+- cgv.co.kr JSON API로 극장/날짜별 상영정보 조회 (날짜당 1회 호출)
+- MOVIE_KEYWORDS 중 하나라도 IMAX관에 열리면 텔레그램 알림
 - 알림 보낸 (영화, 날짜)는 state.json에 기록해 중복 방지
 
 환경변수:
   TELEGRAM_BOT_TOKEN : @BotFather 로 만든 봇 토큰
   TELEGRAM_CHAT_ID   : 알림 받을 채팅 ID
-  CGV_CUST_NO        : (선택) CGV 고객번호 — 없이 실패하면 Secrets로 추가
 """
 
 import json
@@ -19,9 +18,9 @@ import requests
 
 # ===================== 설정 =====================
 CO_CD = "A420"
-SITE_NO = "0013"        # 용산아이파크몰
-MOVIE_KEYWORD = "오디세이"  # 영화 제목에 포함될 키워드
-DAYS_AHEAD = 21         # 오늘부터 며칠 뒤까지 체크
+SITE_NO = "0013"                    # 용산아이파크몰
+MOVIE_KEYWORDS = ["오디세이", "아바타"]  # 감시할 영화 키워드들 (원하는 만큼 추가)
+DAYS_AHEAD = 21                     # 오늘부터 며칠 뒤까지 체크
 STATE_FILE = "state.json"
 # ================================================
 
@@ -60,76 +59,73 @@ def send_telegram(message: str) -> None:
 
 
 def fmt_time(t: str) -> str:
-    """'0630' -> '06:30' (25시 표기 등 그대로 유지)"""
+    """'0630' -> '06:30'"""
     return f"{t[:2]}:{t[2:]}" if t and len(t) == 4 else t
 
 
-def check_date(target: date) -> list[str]:
-    """해당 날짜에서 (키워드 영화 + IMAX관) 회차 목록을 반환."""
+def fetch_imax_rows(target: date) -> list[dict]:
+    """해당 날짜의 IMAX관 상영 row들을 반환 (API 호출은 날짜당 1회)."""
     params = {
         "coCd": CO_CD,
         "siteNo": SITE_NO,
         "scnYmd": target.strftime("%Y%m%d"),
         "rtctlScopCd": "08",
     }
-    cust_no = os.environ.get("CGV_CUST_NO", "")
-    if cust_no:
-        params["custNo"] = cust_no
-
     resp = requests.get(API_URL, params=params, headers=HEADERS, timeout=15)
     if resp.status_code != 200:
         print(f"[debug] {target} status={resp.status_code} head={resp.text[:120]!r}")
         resp.raise_for_status()
 
-    payload = resp.json()
-    rows = payload.get("data") or []
-    imax = sorted({
-        f'{r.get("scnsNm","")}/{r.get("expoProdNm","")}'
-        for r in rows
+    rows = resp.json().get("data") or []
+    imax_rows = [
+        r for r in rows
         if "IMAX" in ((r.get("scnsNm") or "") + (r.get("scnsEnm") or "")).upper()
-    })
-    print(f"[debug] {target} rows={len(rows)} imax={imax}")
-
-    found = []
-    for row in rows:
-        hall = (row.get("scnsNm") or "") + (row.get("scnsEnm") or "")
-        title = row.get("expoProdNm") or row.get("movNm") or ""
-        if "IMAX" not in hall.upper():
-            continue
-        if MOVIE_KEYWORD not in title:
-            continue
-        start = fmt_time(row.get("scnsrtTm", ""))
-        free = row.get("frSeatCnt", "?")
-        total = row.get("stcnt", "?")
-        found.append(f"{start} (잔여 {free}/{total}석)")
-    return found
+    ]
+    print(f"[debug] {target} rows={len(rows)} imax_rows={len(imax_rows)}")
+    return imax_rows
 
 
 def main() -> None:
     state = load_state()
-    new_alerts = []
+    # 영화별로 알림 내용을 모음: {키워드: [날짜 블록, ...]}
+    alerts: dict[str, list[str]] = {}
 
     today = date.today()
     for offset in range(DAYS_AHEAD + 1):
         target = today + timedelta(days=offset)
-        key = f"{MOVIE_KEYWORD}:{target.isoformat()}"
-        if key in state:
+        # 이 날짜를 아직 알림 안 보낸 키워드가 하나라도 있을 때만 조회
+        pending = [
+            kw for kw in MOVIE_KEYWORDS
+            if f"{kw}:{target.isoformat()}" not in state
+        ]
+        if not pending:
             continue
         try:
-            hits = check_date(target)
+            imax_rows = fetch_imax_rows(target)
         except Exception as e:  # 오류는 다음 실행에 재시도
             print(f"[warn] {target} check failed: {e}", file=sys.stderr)
             continue
-        if hits:
-            state.add(key)
-            new_alerts.append(
-                f"📅 {target.strftime('%m/%d(%a)')}\n" + "\n".join(hits)
-            )
 
-    if new_alerts:
+        for kw in pending:
+            hits = [
+                f'{fmt_time(r.get("scnsrtTm", ""))} '
+                f'(잔여 {r.get("frSeatCnt", "?")}/{r.get("stcnt", "?")}석)'
+                for r in imax_rows
+                if kw in (r.get("expoProdNm") or r.get("movNm") or "")
+            ]
+            if hits:
+                state.add(f"{kw}:{target.isoformat()}")
+                alerts.setdefault(kw, []).append(
+                    f"📅 {target.strftime('%m/%d(%a)')}\n" + "\n".join(hits)
+                )
+
+    if alerts:
+        sections = [
+            f"🎬 {kw}\n\n" + "\n\n".join(blocks)
+            for kw, blocks in alerts.items()
+        ]
         msg = (
-            f"🎬 CGV 용산 IMAX 예매 오픈!\n"
-            f"영화: {MOVIE_KEYWORD}\n\n" + "\n\n".join(new_alerts) +
+            "🚨 CGV 용산 IMAX 예매 오픈!\n\n" + "\n\n——————\n\n".join(sections) +
             "\n\n▶ https://cgv.co.kr/cnm/movieBook/cinema"
         )
         send_telegram(msg)
