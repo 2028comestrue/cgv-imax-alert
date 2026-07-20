@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 # ===================== 설정 =====================
 THEATER_CODE = "0013"   # 용산아이파크몰 (CGV 극장코드)
 AREA_CODE = "01"        # 서울
-MOVIE_KEYWORD = "스파이더맨-브랜드 뉴 데이"     # 영화 제목에 포함될 키워드 (예: "듄", "아바타")
+MOVIE_KEYWORD = "듄"     # 영화 제목에 포함될 키워드 (예: "듄", "아바타")
 DAYS_AHEAD = 14         # 오늘부터 며칠 뒤까지 체크할지
 STATE_FILE = "state.json"
 # ================================================
@@ -68,22 +68,28 @@ def check_date(target: date) -> list[str]:
     soup = BeautifulSoup(resp.text, "html.parser")
 
     found = []
+    blocks = soup.select("div.col-times")
+    titles = []
     # 영화별 블록: div.col-times 안에 제목(strong)과 관/회차 정보가 있음
-    for block in soup.select("div.col-times"):
+    for block in blocks:
         title_el = block.select_one("div.info-movie strong")
         if not title_el:
             continue
         title = title_el.get_text(strip=True)
+        titles.append(title)
         if MOVIE_KEYWORD not in title:
             continue
 
         for hall in block.select("div.type-hall"):
             hall_name = hall.get_text(" ", strip=True)
+            print(f"[debug] {target} hall for '{title}': {hall_name[:60]}")
             if "IMAX" not in hall_name.upper():
                 continue
             times = [t.get_text(strip=True) for t in hall.select("a span.time")]
             if times:
                 found.append(f"{title} | {', '.join(times)}")
+    # 디버그: 이 날짜에 파싱된 영화 목록 (파싱 실패 vs 조건 불일치 구분용)
+    print(f"[debug] {target} blocks={len(blocks)} titles={titles}")
     return found
 
 
