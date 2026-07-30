@@ -20,6 +20,9 @@ jobs:
 
       - run: pip install requests
 
+      - name: Dump
+        run: python monitor.py --dump --days 8
+      
       - name: Run monitor
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
