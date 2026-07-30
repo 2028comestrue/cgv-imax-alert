@@ -58,7 +58,7 @@ TARGET_DATES: list[date] = [
 DAYS_AHEAD = 21
 
 # 특정 영화만 볼 거면 키워드 지정 (빈 리스트 = 전부)
-MOVIE_KEYWORDS: list[str] = [스파이더맨]
+MOVIE_KEYWORDS: list[str] = ["스파이더맨"]
 
 EMPTY_STREAK_STOP = 2            # 빈 날짜 연속 N개면 그 뒤는 안 봄
 INTERVAL_SEC = 60
