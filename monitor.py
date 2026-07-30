@@ -32,6 +32,7 @@ import random
 import sys
 import time
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -43,7 +44,9 @@ SITE_NO = "0013"                 # 용산아이파크몰
 # 비교는 공백·하이픈 제거 + 대문자 기준
 WATCH_FORMATS: list[tuple[str, tuple[str, ...]]] = [
     ("IMAX",      ("IMAX",)),
-    ("ULTRA 4DX", ("ULTRA4DX", "4DXSCREEN", "4DXWITH", "울트라4DX")),
+    # 주의: CGV API는 용산 3관을 "4DX관"으로만 표기한다 (ULTRA 4DX는 브랜드명일 뿐).
+    # 용산 전용이므로 일반 "4DX"도 여기에 매핑한다. 다른 지점으로 바꾸면 재검토 필요.
+    ("ULTRA 4DX", ("ULTRA4DX", "4DXSCREEN", "4DXWITH", "울트라4DX", "4DX")),
     ("SCREENX",   ("SCREENX", "스크린X")),
 ]
 
@@ -79,6 +82,12 @@ HEADERS = {
     "Referer": BOOK_URL,
 }
 WEEKDAY_KR = "월화수목금토일"
+KST = ZoneInfo("Asia/Seoul")
+
+
+def today_kst() -> date:
+    """GitHub 러너는 UTC라 date.today()가 한국보다 하루 전일 수 있다."""
+    return datetime.now(KST).date()
 
 _session = requests.Session()
 _session.headers.update(HEADERS)
@@ -139,8 +148,8 @@ def fmt_time(t: str) -> str:
 
 def target_dates() -> list[date]:
     if TARGET_DATES:
-        return sorted(d for d in TARGET_DATES if d >= date.today())
-    today = date.today()
+        return sorted(d for d in TARGET_DATES if d >= today_kst())
+    today = today_kst()
     return [today + timedelta(days=i) for i in range(DAYS_AHEAD + 1)]
 
 
@@ -191,11 +200,11 @@ def fetch_rows(target: date) -> list[dict]:
 
 
 # --------------------- scan ---------------------
-def scan(state: set[str], verbose: bool = True) -> dict[date, dict[str, list[str]]]:
+def scan(state: set[str], verbose: bool = True) -> dict[date, dict[str, list[tuple[str, str]]]]:
     """
     반환: {날짜: {관라벨: [상영작, ...]}}  — 새로 열린 것만
     """
-    alerts: dict[date, dict[str, list[str]]] = {}
+    alerts: dict[date, dict[str, list[tuple[str, str]]]] = {}
     empty_streak = 0
     calls = 0
 
@@ -223,7 +232,7 @@ def scan(state: set[str], verbose: bool = True) -> dict[date, dict[str, list[str
         empty_streak = 0
 
         # 관별로 상영작 수집
-        by_fmt: dict[str, set[str]] = {}
+        by_fmt: dict[str, set[tuple[str, str]]] = {}
         for r in rows:
             label = detect_format(r)
             if not label:
@@ -231,7 +240,8 @@ def scan(state: set[str], verbose: bool = True) -> dict[date, dict[str, list[str
             title = pick(r, FIELD_TITLE) or "(제목없음)"
             if MOVIE_KEYWORDS and not any(k in title for k in MOVIE_KEYWORDS):
                 continue
-            by_fmt.setdefault(label, set()).add(title)
+            hall = pick(r, FIELD_HALL) or label
+            by_fmt.setdefault(label, set()).add((hall, title))
 
         if verbose:
             summary = ", ".join(f"{k}({len(v)})" for k, v in sorted(by_fmt.items())) or "-"
@@ -248,12 +258,14 @@ def scan(state: set[str], verbose: bool = True) -> dict[date, dict[str, list[str
     return alerts
 
 
-def build_message(alerts: dict[date, dict[str, list[str]]]) -> str:
+def build_message(alerts: dict[date, dict[str, list[tuple[str, str]]]]) -> str:
     blocks = []
     for day in sorted(alerts):
         lines = [f"📅 {fmt_day(day)}"]
         for label in [lbl for lbl, _ in WATCH_FORMATS if lbl in alerts[day]]:
-            lines.append(f"  • {label} — {', '.join(alerts[day][label])}")
+            lines.append(f"  • {label}")
+            for hall, title in alerts[day][label]:
+                lines.append(f"      {hall} — {title}")
         blocks.append("\n".join(lines))
     return (
         "🚨 CGV 용산 특별관 시간표 오픈!\n\n"
@@ -322,7 +334,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.dump:
-        dump(date.today() + timedelta(days=args.days))
+        dump(today_kst() + timedelta(days=args.days))
         return
     if args.test:
         send_telegram("✅ CGV 알리미 연결 테스트")
