@@ -42,13 +42,19 @@ SITE_NO = "0013"                 # 용산아이파크몰
 
 # 감시할 특별관. 위에서부터 먼저 매칭됨 (순서 중요)
 # 비교는 공백·하이픈 제거 + 대문자 기준
+# 순서 = 매칭 우선순위이자 알림 헤드라인 우선순위
 WATCH_FORMATS: list[tuple[str, tuple[str, ...]]] = [
-    ("IMAX",      ("IMAX",)),
     # 주의: CGV API는 용산 3관을 "4DX관"으로만 표기한다 (ULTRA 4DX는 브랜드명일 뿐).
     # 용산 전용이므로 일반 "4DX"도 여기에 매핑한다. 다른 지점으로 바꾸면 재검토 필요.
     ("ULTRA 4DX", ("ULTRA4DX", "4DXSCREEN", "4DXWITH", "울트라4DX", "4DX")),
+    ("IMAX",      ("IMAX",)),
     ("SCREENX",   ("SCREENX", "스크린X")),
 ]
+
+# 카드 이미지 설정
+CARD_ENABLED = True
+FONT_BOLD = "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf"
+FONT_REG = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
 
 # 특정 날짜만 볼 거면 여기에 나열 (비워두면 오늘부터 DAYS_AHEAD일)
 TARGET_DATES: list[date] = [
@@ -58,7 +64,7 @@ TARGET_DATES: list[date] = [
 DAYS_AHEAD = 21
 
 # 특정 영화만 볼 거면 키워드 지정 (빈 리스트 = 전부)
-MOVIE_KEYWORDS: list[str] = ["스파이더맨"]
+MOVIE_KEYWORDS: list[str] = []
 
 EMPTY_STREAK_STOP = 2            # 빈 날짜 연속 N개면 그 뒤는 안 봄
 INTERVAL_SEC = 60
@@ -153,15 +159,151 @@ def target_dates() -> list[date]:
     return [today + timedelta(days=i) for i in range(DAYS_AHEAD + 1)]
 
 
-def send_telegram(message: str) -> None:
+# --------------------- 카드 이미지 ---------------------
+_FONTS: dict | None = None
+
+
+def _load_fonts():
+    """폰트를 한 번만 로드해 재사용. 실패하면 None (카드 비활성)."""
+    global _FONTS
+    if _FONTS is not None:
+        return _FONTS or None
+    try:
+        from PIL import ImageFont
+        _FONTS = {
+            "lbl": ImageFont.truetype(FONT_BOLD, 22),
+            "head": ImageFont.truetype(FONT_BOLD, 42),
+            "big": ImageFont.truetype(FONT_BOLD, 58),
+            "body": ImageFont.truetype(FONT_REG, 30),
+            "sm": ImageFont.truetype(FONT_REG, 24),
+        }
+    except Exception as e:
+        print(f"[warn] 폰트 로드 실패, 텍스트 알림으로 대체: {e}", file=sys.stderr)
+        _FONTS = {}
+    return _FONTS or None
+
+
+def flatten(alerts) -> list[tuple[date, str, str, str]]:
+    """(날짜, 관라벨, 관이름, 영화) 리스트. WATCH_FORMATS 순 → 날짜 순."""
+    order = {lbl: i for i, (lbl, _) in enumerate(WATCH_FORMATS)}
+    out = []
+    for day in alerts:
+        for label, pairs in alerts[day].items():
+            for hall, title in pairs:
+                out.append((day, label, hall, title))
+    out.sort(key=lambda x: (order.get(x[1], 99), x[0]))
+    return out
+
+
+def render_card(items: list[tuple[date, str, str, str]]) -> bytes | None:
+    fonts = _load_fonts()
+    if not fonts:
+        return None
+    try:
+        import io
+        from PIL import Image, ImageDraw
+    except Exception:
+        return None
+
+    day, label, hall, title = items[0]
+    rest = items[1:5]
+    W = 800
+    H = 340 + (52 * len(rest) + 30 if rest else 0)
+
+    img = Image.new("RGB", (W, H), "#FFFFFF")
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 0, W, 120], fill="#501313")
+    d.text((40, 30), "CGV 용산아이파크몰", font=fonts["lbl"], fill="#F09595")
+    d.text((40, 62), f"{label} 오픈", font=fonts["head"], fill="#FCEBEB")
+
+    d.text((40, 155), f"{day.month}/{day.day}", font=fonts["big"], fill="#111111")
+    wd = WEEKDAY_KR[day.weekday()] + "요일"
+    d.text((40 + d.textlength(f"{day.month}/{day.day}", font=fonts["big"]) + 16, 180),
+           wd, font=fonts["body"], fill="#666666")
+    d.text((40, 240), title[:26], font=fonts["body"], fill="#111111")
+    d.text((40, 285), hall[:34], font=fonts["sm"], fill="#666666")
+
+    if rest:
+        d.line([40, 345, W - 40, 345], fill="#DDDDDD", width=2)
+        for i, (d2, lb2, _h2, t2) in enumerate(rest):
+            y = 375 + i * 52
+            tw = int(d.textlength(lb2, font=fonts["sm"])) + 24
+            d.rounded_rectangle([40, y, 40 + tw, y + 38], radius=6, fill="#E6F1FB")
+            d.text((52, y + 7), lb2, font=fonts["sm"], fill="#0C447C")
+            d.text((60 + tw, y + 7), f"{d2.month}/{d2.day} · {t2[:16]}",
+                   font=fonts["sm"], fill="#444444")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+# --------------------- 텔레그램 ---------------------
+def esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_caption(items: list[tuple[date, str, str, str]]) -> str:
+    day, label, hall, title = items[0]
+    lines = [
+        f"\U0001F6A8 <b>{esc(label)} 열렸습니다</b>",
+        "",
+        esc(title),
+        f"{day.month}/{day.day} ({WEEKDAY_KR[day.weekday()]}) · {esc(hall)}",
+    ]
+    rest = items[1:]
+    if rest:
+        lines += ["", "━━ 같이 열린 것"]
+        for d2, lb2, _h2, t2 in rest[:8]:
+            lines.append(f"· {esc(lb2)} · {d2.month}/{d2.day}({WEEKDAY_KR[d2.weekday()]}) · {esc(t2)}")
+        if len(rest) > 8:
+            lines.append(f"· 외 {len(rest) - 8}건")
+    text = "\n".join(lines)
+    return text[:1000]          # 캡션 상한 1024자
+
+
+def _chat_ids() -> list[str]:
+    return [c.strip() for c in os.environ["TELEGRAM_CHAT_ID"].split(",") if c.strip()]
+
+
+KEYBOARD = {"inline_keyboard": [[{"text": "\U0001F3AB 예매하러 가기", "url": BOOK_URL}]]}
+
+
+def _post(method: str, payload: dict, files=None) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
-    resp = _session.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
-        timeout=10,
-    )
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    if files:
+        resp = _session.post(url, data=payload, files=files, timeout=30)
+    else:
+        resp = _session.post(url, json=payload, timeout=15)
     resp.raise_for_status()
+
+
+def send_alert(alerts) -> None:
+    items = flatten(alerts)
+    caption = build_caption(items)
+    png = render_card(items) if CARD_ENABLED else None
+
+    for chat_id in _chat_ids():
+        try:
+            if png:
+                _post("sendPhoto",
+                      {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML",
+                       "reply_markup": json.dumps(KEYBOARD)},
+                      files={"photo": ("cgv.png", png, "image/png")})
+            else:
+                _post("sendMessage",
+                      {"chat_id": chat_id, "text": caption, "parse_mode": "HTML",
+                       "disable_web_page_preview": True, "reply_markup": KEYBOARD})
+        except Exception as e:
+            print(f"[warn] {chat_id} 전송 실패: {e}", file=sys.stderr)
+
+
+def send_telegram(message: str) -> None:
+    """--test 용 평문 전송."""
+    for chat_id in _chat_ids():
+        _post("sendMessage", {"chat_id": chat_id, "text": message,
+                              "disable_web_page_preview": True})
 
 
 # --------------------- fetch ---------------------
@@ -280,7 +422,7 @@ def run_once(state: set[str], verbose: bool = True) -> bool:
     if not alerts:
         print(f"[{stamp}] no new openings")
         return False
-    send_telegram(build_message(alerts))
+    send_alert(alerts)
     save_state(state)
     print(f"[{stamp}] alert sent — {len(alerts)}개 날짜")
     return True
